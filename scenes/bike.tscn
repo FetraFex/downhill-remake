@@ -1,0 +1,14 @@
+[gd_scene format=3 uid="uid://4m1gv4wrjq0h"]
+
+[ext_resource type="PackedScene" uid="uid://cbqk8msu5yt8w" path="res://assets/models/bikes/Bike.glb" id="1_oy3wg"]
+
+[node name="Bike" unique_id=902191576 instance=ExtResource("1_oy3wg")]
+
+[node name="BikeRoot" parent="." index="0" unique_id=1126492570]
+transform = Transform3D(-1, 0, 8.742278e-08, 0, 1, 0, -8.742278e-08, 0, -1, 0, 0, 0)
+
+[node name="RearWheelPivot" parent="BikeRoot" index="2" unique_id=552864459]
+transform = Transform3D(1.9470717e-07, 0, 0.99999994, 0, 1, 0, -0.99999994, 0, 1.9470717e-07, -0.004460791, 0.3383971, -0.6011669)
+
+[node name="FrontWheelPivot" parent="BikeRoot/SteeringPivot" parent_id_path=PackedInt32Array(1254926816) index="1" unique_id=593366257]
+transform = Transform3D(-0.0010869565, -0.0028949191, -0.99999535, 0.89016366, -0.45564103, 0.00035147672, -0.45563993, -0.89015895, 0.0030722136, -0.011504373, -0.03376804, 0.6411751)

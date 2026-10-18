@@ -1,0 +1,46 @@
+[gd_scene format=3 uid="uid://cg3jvaq77a58r"]
+
+[ext_resource type="Texture2D" uid="uid://8hu7xw13vd7i" path="res://assets/textures/prototype/templategrid/TemplateGrid_albedo.png" id="1_o5qli"]
+[ext_resource type="PackedScene" uid="uid://d3cpn2fp2hvua" path="res://scenes/player.tscn" id="2_0wfyh"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_fjkdt"]
+
+[sub_resource type="Sky" id="Sky_v03rh"]
+sky_material = SubResource("ProceduralSkyMaterial_fjkdt")
+
+[sub_resource type="Environment" id="Environment_28u8r"]
+background_mode = 2
+sky = SubResource("Sky_v03rh")
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_0wfyh"]
+albedo_texture = ExtResource("1_o5qli")
+uv1_triplanar = true
+
+[sub_resource type="BoxMesh" id="BoxMesh_ae08u"]
+size = Vector3(100, 0.1, 100)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ae08u"]
+size = Vector3(100, 0.1, 100)
+
+[node name="World" type="Node3D" unique_id=54061640]
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=2020295237]
+transform = Transform3D(0.9944413, -0.105293274, 6.8425665e-09, 0.057866026, 0.54651505, 0.83544767, -0.08796703, -0.8308036, 0.54956996, 0, 0, 0)
+shadow_enabled = true
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="DirectionalLight3D" unique_id=1143972982]
+environment = SubResource("Environment_28u8r")
+
+[node name="StaticBody3D" type="StaticBody3D" parent="." unique_id=704435304]
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="StaticBody3D" unique_id=1323394997]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.05, 0)
+material_override = SubResource("StandardMaterial3D_0wfyh")
+mesh = SubResource("BoxMesh_ae08u")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="StaticBody3D" unique_id=1020579236]
+shape = SubResource("BoxShape3D_ae08u")
+
+[node name="Player" parent="." unique_id=2079259347 instance=ExtResource("2_0wfyh")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.14895546, 0)
+axis_lock_angular_x = false
