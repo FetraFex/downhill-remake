@@ -25,8 +25,20 @@ extends RigidBody3D
 @export var air_drag := 0.3
 @export var lateral_grip := 20.0
 
+@export_group("Steering")
+@export var max_steer := 0.35
+@export var steer_speed_factor := 0.15
+@export var steer_smoothing :=  8.0
+
+@export_group("Balance (virtual rider)")
+@export var balance_stiffness := 2500.0
+@export var balance_damping := 350.0
+@export var max_lean := 0.9
+@export var gravity := 9.8
+
 var front_force := 0.0
 var rear_force := 0.0
+var steer_angle := 0.0
 
 @onready var pcam: PhantomCamera3D = $ThirdPersonCamera
 @export var mouse_sensitivity: float = 0.1
@@ -78,8 +90,15 @@ func _physics_process(delta: float) -> void:
 	
 	var drive := pedal * pedal_force * clampf(1.0 - speed / pedal_max_speed, 0.0, 1.0)
 	
-	tire_forces(front, front_force, 0.0, brake * brake_force * front_brake_share)
-	tire_forces(rear, rear_force, drive, brake * brake_force * (1.0 - front_brake_share))
+	var steer_input := Input.get_axis("steer_left", "steer_right")
+	var steer_limit := max_steer / (1.0 + speed * steer_speed_factor)
+	steer_angle = lerpf(steer_angle, steer_input * steer_limit, 1.0 - exp(-steer_smoothing * delta))
+
+	tire_forces(front, front_force, 0.0, brake * brake_force * front_brake_share, steer_angle)
+	tire_forces(rear, rear_force, drive, brake * brake_force * (1.0 - front_brake_share), 0.0)
+	
+	# Balance
+	balance()
 	
 	if speed > 0.1:
 		apply_central_force(-linear_velocity.normalized() * air_drag * speed * speed)
@@ -110,7 +129,7 @@ func suspension(ray: RayCast3D, wheel_radius: float, ray_to_hub: float) -> float
 	apply_force(ray.get_collision_normal() * force, offset)
 	return force
 	
-func tire_forces(ray: RayCast3D, wheel_load: float, drive: float, brake: float) -> void:
+func tire_forces(ray: RayCast3D, wheel_load: float, drive: float, brake: float, steer: float) -> void:
 	# No load or no contact: the tyre can't push on anything.
 	if wheel_load <= 0.0 or not ray.is_colliding():
 		return
@@ -121,6 +140,7 @@ func tire_forces(ray: RayCast3D, wheel_load: float, drive: float, brake: float) 
 	# Two directions lying on the ground: where the tyre rolls ("forward") and its side ("right").
 	var forward := -global_basis.z
 	forward = (forward - normal * forward.dot(normal)).normalized()
+	forward = forward.rotated(normal, steer)
 	var right := forward.cross(normal)
  
 	# Speed of the contact point, split into "along the road" and "sideways".
@@ -148,3 +168,32 @@ func tire_forces(ray: RayCast3D, wheel_load: float, drive: float, brake: float) 
 		tyre_force = tyre_force.normalized() * grip_limit
  
 	apply_force(forward * tyre_force.x + right * tyre_force.y, contact - global_position)
+
+
+func balance() -> void:
+	var front_on := front.is_colliding() and front_force > 0.0
+	var rear_on := rear.is_colliding() and rear_force > 0.0
+	
+	if not front_on and not rear_on:
+		return
+		
+	var normal := Vector3.ZERO
+	if front_on:
+		normal += front.get_collision_normal()
+	if rear_on:
+		normal += rear.get_collision_normal()
+	normal = normal.normalized()
+	
+	var forward := -global_basis.z
+	forward = (forward - normal * forward.dot(normal)).normalized()
+	var speed := linear_velocity.dot(forward)
+	
+	var yaw_rate := angular_velocity.dot(normal)
+	var lean := clampf(atan2(speed * yaw_rate, gravity), -max_lean, max_lean)
+	
+	var target_up := normal.rotated(forward, -lean)
+	
+	var roll_error := global_basis.y.cross(target_up).dot(forward)
+	var roll_rate := angular_velocity.dot(forward)
+	var torque := balance_stiffness * roll_error - balance_damping * roll_rate
+	apply_torque(forward * torque)

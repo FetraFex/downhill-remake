@@ -43,4 +43,4 @@ shape = SubResource("BoxShape3D_ae08u")
 
 [node name="Player" parent="." unique_id=2079259347 instance=ExtResource("2_0wfyh")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.14895546, 0)
-axis_lock_angular_x = false
+inertia = Vector3(45, 10, 22)

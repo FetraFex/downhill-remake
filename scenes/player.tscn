@@ -15,9 +15,6 @@ height = 0.63820803
 script = ExtResource("2_dqkch")
 
 [node name="Player" type="RigidBody3D" unique_id=2079259347 node_paths=PackedStringArray("front", "rear")]
-axis_lock_angular_x = true
-axis_lock_angular_y = true
-axis_lock_angular_z = true
 mass = 83.0
 can_sleep = false
 script = ExtResource("1_qlg0r")
