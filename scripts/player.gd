@@ -1,6 +1,12 @@
 class_name Player
 extends RigidBody3D
 
+signal landed(quality: float, air_time: float)
+signal crashed
+signal jumped(strength: float)
+
+enum State {GROUNDED, AIRBORNE, CRASHED}
+
 @export var front: RayCast3D
 @export var rear: RayCast3D
 @export var spring: float = 8800
@@ -36,9 +42,55 @@ extends RigidBody3D
 @export var max_lean := 0.9
 @export var gravity := 9.8
 
+@export_group("Rider (Weigh Shift)")
+@export var rider_travel := 0.3
+@export var rider_speed := 5.0
+@export var rider_mass_share := 0.83
+@export var auto_pitch_stiffness := 1.0
+@export var auto_pitch_damping := 0.2
+@export var slope_shift := 0.5
+
+@export_group("Air and Crash")
+@export var air_delay :=  0.12
+@export var air_pitch_torque := 180.0
+@export var air_yaw_torque := 60.0
+@export var air_roll_stiffness := 400.0
+@export var air_damping := 60.0
+@export var crash_tilt := 1.1
+@export var crash_time := 1.5
+@export var respawn_lift := 0.4
+
+@export_group("Jump")
+@export var jump_charge_time := 0.6
+@export var preload_force := 800.0
+@export var pop_impulse := 300.0
+@export var pop_front_share := 0.6
+@export var pop_rear_delay :=  0.08
+@export var jump_coyote :=  0.12
+@export var jump_cooldown := 0.3
+
 var front_force := 0.0
 var rear_force := 0.0
+var front_compression := 0.0
+var rear_compression := 0.0
+var _last_compression := 0.0 
 var steer_angle := 0.0
+var rider_shift := 0.0
+var _com_rest := Vector3.ZERO
+
+var state := State.GROUNDED
+var air_time := 0.0
+var _since_ground := 0.0
+var _crash_timer := 0.0
+var _grace := 1.0
+var _safe_position := Vector3.ZERO
+var _safe_yaw := 0.0
+
+var _jump_charge := 0.0
+var _jump_cooldown :=  0.0
+var _pop_rear_timer :=  0.0
+var _pop_rear_strength := 0.0
+var _pop_direction := Vector3.UP
 
 @onready var pcam: PhantomCamera3D = $ThirdPersonCamera
 @export var mouse_sensitivity: float = 0.1
@@ -48,6 +100,19 @@ var max_pitch: float = 90.0  # Look-down limit (degrees)
 var pcam_rotation_degrees: Vector3 = Vector3.ZERO
 
 func _ready() -> void:
+	can_sleep = false
+	_com_rest = center_of_mass
+	
+	if center_of_mass_mode != RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM:
+		push_warning("Set Center Of Mass Mode to Custom on the Player, or the weight shift won't work.")
+	
+	contact_monitor = true
+	max_contacts_reported = 4
+	body_entered.connect(_on_body_entered)
+	
+	_safe_position = global_position
+	var f := -global_basis.z
+	_safe_yaw = atan2(-f.x, -f.z)
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	
 	# Optional: Sync with any initial rotation set in the editor
@@ -82,7 +147,14 @@ func _input(event: InputEvent) -> void:
 	
 func _physics_process(delta: float) -> void:
 	front_force = suspension(front, front_wheel_radius, front_ray_to_hub)
+	front_compression = _last_compression
 	rear_force = suspension(rear, rear_wheel_radius, rear_ray_to_hub)
+	rear_compression = _last_compression	
+	
+	# State 
+	update_state(delta)
+	if state == State.CRASHED:
+		return
 	
 	var pedal := Input.get_action_strength("pedal")
 	var brake := Input.get_action_strength("brake")
@@ -90,7 +162,7 @@ func _physics_process(delta: float) -> void:
 	
 	var drive := pedal * pedal_force * clampf(1.0 - speed / pedal_max_speed, 0.0, 1.0)
 	
-	var steer_input := Input.get_axis("steer_left", "steer_right")
+	var steer_input := Input.get_axis("steer_right", "steer_left")
 	var steer_limit := max_steer / (1.0 + speed * steer_speed_factor)
 	steer_angle = lerpf(steer_angle, steer_input * steer_limit, 1.0 - exp(-steer_smoothing * delta))
 
@@ -99,6 +171,11 @@ func _physics_process(delta: float) -> void:
 	
 	# Balance
 	balance()
+	rider_pitch(delta)
+	jump_control(delta)
+	
+	if state == State.AIRBORNE:
+		air_control()
 	
 	if speed > 0.1:
 		apply_central_force(-linear_velocity.normalized() * air_drag * speed * speed)
@@ -110,9 +187,7 @@ func suspension(ray: RayCast3D, wheel_radius: float, ray_to_hub: float) -> float
 		return 0.0
 	
 	var down := (ray.global_basis * ray.target_position).normalized()
-	print("Down: ", down)
 	var distance := ray.global_position.distance_to(ray.get_collision_point())
-	print ("Impact Distance: ", distance)
 	
 	var compression := ray_to_hub - (distance - wheel_radius)
 	if compression <= 0.0:
@@ -171,29 +246,192 @@ func tire_forces(ray: RayCast3D, wheel_load: float, drive: float, brake: float, 
 
 
 func balance() -> void:
-	var front_on := front.is_colliding() and front_force > 0.0
-	var rear_on := rear.is_colliding() and rear_force > 0.0
-	
-	if not front_on and not rear_on:
-		return
-		
-	var normal := Vector3.ZERO
-	if front_on:
-		normal += front.get_collision_normal()
-	if rear_on:
-		normal += rear.get_collision_normal()
-	normal = normal.normalized()
-	
+	var normal := ground_normal()
+	if normal == Vector3.ZERO:
+		return   # in the air there is no ground to balance against
+ 
+	# Forward direction on the ground, and speed along it.
 	var forward := -global_basis.z
 	forward = (forward - normal * forward.dot(normal)).normalized()
 	var speed := linear_velocity.dot(forward)
-	
+ 
+	# Lean angle the current turn needs (positive = left), limited to max_lean.
 	var yaw_rate := angular_velocity.dot(normal)
 	var lean := clampf(atan2(speed * yaw_rate, gravity), -max_lean, max_lean)
-	
+ 
+	# The "up" the rider wants: the ground normal tilted sideways by the lean angle.
 	var target_up := normal.rotated(forward, -lean)
-	
+ 
+	# PD controller on the roll axis: push toward the target, damp the roll speed.
 	var roll_error := global_basis.y.cross(target_up).dot(forward)
 	var roll_rate := angular_velocity.dot(forward)
 	var torque := balance_stiffness * roll_error - balance_damping * roll_rate
 	apply_torque(forward * torque)
+	
+
+func ground_normal() -> Vector3:
+	var normal := Vector3.ZERO
+	if front.is_colliding() and front_force > 0.0:
+		normal += front.get_collision_normal()
+	if rear.is_colliding() and rear_force > 0.0:
+		normal += rear.get_collision_normal()
+	return normal.normalized()
+	
+
+func rider_pitch(delta: float) -> void:
+	var target := 0.0
+	var normal := ground_normal()
+ 
+	if normal != Vector3.ZERO:
+		var forward := -global_basis.z
+		var pitch := asin(clampf(forward.dot(normal), -1.0, 1.0))   # positive = nose above the ground
+		var pitch_rate := angular_velocity.dot(global_basis.x)      # positive = nose rising
+		var forward_ground := (forward - normal * forward.dot(normal)).normalized()
+		var slope := asin(clampf(forward_ground.y, -1.0, 1.0))      # positive = uphill
+ 
+		# Reflex: nose up -> weight forward (pushes the nose down). Nose down -> weight back.
+		var auto := auto_pitch_stiffness * pitch + auto_pitch_damping * pitch_rate + slope_shift * slope
+ 
+		# Your input wins over the reflex.
+		var manual := Input.get_axis("lean_back", "lean_forward")    # +1 = forward
+		target = manual * rider_travel + auto * (1.0 - absf(manual))
+		target = clampf(target, -rider_travel, rider_travel)
+ 
+	# In the air (target 0) the rider returns to the middle.
+	rider_shift = lerpf(rider_shift, target, 1.0 - exp(-rider_speed * delta))
+ 
+	# Moving the rider by d moves the COM of the whole bike by d * rider_mass_share.
+	# Forward on the bike is -Z, so a forward shift means a negative Z offset.
+	center_of_mass = _com_rest + Vector3(0.0, 0.0, -rider_shift * rider_mass_share)
+ 
+
+func update_state(delta: float) -> void:
+	_grace = maxf(_grace - delta, 0.0)
+ 
+	# A wheel "touches" when its suspension pushes. Count the time since that last happened.
+	var on_ground := front_force > 0.0 or rear_force > 0.0
+	if on_ground:
+		_since_ground = 0.0
+	else:
+		_since_ground += delta
+ 
+	if Input.is_action_just_pressed("respawn"):
+		respawn()
+		return
+ 
+	match state:
+		State.GROUNDED:
+			if _since_ground > air_delay:
+				# Both wheels off the ground for a moment: this is a jump (not just a bump).
+				state = State.AIRBORNE
+				air_time = 0.0
+			elif tilt_angle() > crash_tilt and _grace <= 0.0:
+				start_crash()
+			elif front_force > 0.0 and rear_force > 0.0 and tilt_angle() < 0.3:
+				# Riding normally on both wheels: remember this spot for the respawn.
+				_safe_position = global_position
+				var f := -global_basis.z
+				_safe_yaw = atan2(-f.x, -f.z)
+ 
+		State.AIRBORNE:
+			air_time += delta
+			if on_ground:
+				state = State.GROUNDED
+				var quality := 1.0 - clampf(tilt_angle() / crash_tilt, 0.0, 1.0)
+				if air_time > 0.25:
+					print("Landed: quality %.2f after %.2f s in the air" % [quality, air_time])
+					landed.emit(quality, air_time)
+				if tilt_angle() > crash_tilt and _grace <= 0.0:
+					start_crash()
+ 
+		State.CRASHED:
+			_crash_timer -= delta
+			if _crash_timer <= 0.0:
+				respawn()
+ 
+
+func tilt_angle() -> float:
+	var normal := ground_normal()
+	if normal == Vector3.ZERO:
+		return 0.0
+	return global_basis.y.angle_to(normal)
+ 
+ 
+func start_crash() -> void:
+	state = State.CRASHED
+	_crash_timer = crash_time
+	print("CRASH")
+	crashed.emit()
+ 
+ 
+func _on_body_entered(_body: Node) -> void:
+	if state != State.CRASHED and _grace <= 0.0:
+		start_crash()
+ 
+func respawn() -> void:
+	var t := Transform3D(Basis(Vector3.UP, _safe_yaw), _safe_position + Vector3.UP * respawn_lift)
+	var rid := get_rid()
+	PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_TRANSFORM, t)
+	PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY, Vector3.ZERO)
+	PhysicsServer3D.body_set_state(rid, PhysicsServer3D.BODY_STATE_ANGULAR_VELOCITY, Vector3.ZERO)
+ 
+	steer_angle = 0.0
+	rider_shift = 0.0
+	_jump_charge = 0.0
+	_pop_rear_timer = 0.0
+	state = State.AIRBORNE      # it drops a little, then lands normally
+	air_time = 0.0
+	_since_ground = 1.0
+	_grace = 1.0                # ignore crashes for a second while it settles
+	reset_physics_interpolation()
+
+func air_control() -> void:
+	var pitch_in := Input.get_axis("lean_forward", "lean_back")   # +1 = pull the bars back = nose up
+	var yaw_in := Input.get_axis("steer_right", "steer_left")     # +1 = turn left
+	apply_torque(global_basis.x * pitch_in * air_pitch_torque)     # + torque around "right" = nose up
+	apply_torque(global_basis.y * yaw_in * air_yaw_torque)
+ 
+	# The rider keeps the wheels below him: a gentle torque against the roll angle.
+	var forward := -global_basis.z
+	var roll_error := global_basis.y.cross(Vector3.UP).dot(forward)
+	apply_torque(forward * air_roll_stiffness * roll_error)
+ 
+	# Damping stops any rotation from growing forever and caps the rotation speed.
+	apply_torque(-angular_velocity * air_damping)
+ 
+func jump_control(delta: float) -> void:
+	_jump_cooldown = maxf(_jump_cooldown - delta, 0.0)
+ 
+	# Second half of a pop that is already under way: the rear wheel.
+	if _pop_rear_timer > 0.0:
+		_pop_rear_timer -= delta
+		if _pop_rear_timer <= 0.0:
+			apply_impulse(_pop_direction * _pop_rear_strength, rear.global_position - global_position)
+ 
+	# You can jump while on the ground, or just after leaving it (coyote time).
+	var can_jump := _since_ground < jump_coyote and _jump_cooldown <= 0.0
+ 
+	if Input.is_action_pressed("jump") and can_jump:
+		# PRELOAD: more and more downward push while the button is held.
+		_jump_charge = minf(_jump_charge + delta / jump_charge_time, 1.0)
+		apply_central_force(-global_basis.y * preload_force * _jump_charge)
+ 
+	elif Input.is_action_just_released("jump") and _jump_charge > 0.0 and can_jump:
+		# POP: a tap gives 35 % of the jump, a full preload gives 100 %.
+		var strength := lerpf(0.35, 1.0, _jump_charge)
+		var normal := ground_normal()
+		if normal == Vector3.ZERO:
+			normal = global_basis.y
+		_pop_direction = normal.lerp(Vector3.UP, 0.5).normalized()   # between "away from the ground" and "straight up"
+ 
+		var total := pop_impulse * strength
+		apply_impulse(_pop_direction * total * pop_front_share, front.global_position - global_position)
+		_pop_rear_strength = total * (1.0 - pop_front_share)
+		_pop_rear_timer = pop_rear_delay
+		_jump_cooldown = jump_cooldown
+		_jump_charge = 0.0
+		jumped.emit(strength)
+ 
+	elif not Input.is_action_pressed("jump"):
+		_jump_charge = 0.0   # button released but no jump possible (in the air, cooldown): forget the preload
+ 
