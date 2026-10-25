@@ -39,6 +39,7 @@ material_override = SubResource("StandardMaterial3D_0wfyh")
 mesh = SubResource("BoxMesh_ae08u")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="StaticBody3D" unique_id=1020579236]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.05, 0)
 shape = SubResource("BoxShape3D_ae08u")
 
 [node name="Player" parent="." unique_id=2079259347 instance=ExtResource("2_0wfyh")]
