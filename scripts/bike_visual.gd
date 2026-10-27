@@ -25,6 +25,10 @@ extends Node3D
 @export var compress_smoothing := 40.0  # how fast the visual follows when the suspension compresses (1/s)
 @export var extend_smoothing := 15.0    # how fast it follows when the suspension extends (1/s)
 @export var max_sink := 0.008           # when compressing, the wheel may lag at most this far (m) behind the ground
+@export var max_float := 0.005          # when extending, the wheel may hang at most this far (m) above the ground
+@export var rear_contact_correction := true  # slowly slides the rear wheel until the tire really touches the ground
+@export var front_trim := 0.0           # LAST RESORT: wheel floats d metres above the ground -> enter d here (negative = sink in)
+@export var rear_trim := 0.0
 
 @export_group("Calibration")
 @export var print_report := true    # prints measured values at start + how far each wheel overlaps the ground
@@ -35,6 +39,7 @@ var _steering_pivot: Node3D
 var _front_pivot: Node3D
 var _front_wheel: Node3D
 var _swingarm_pivot: Node3D
+var _rear_pivot: Node3D
 var _rear_wheel: Node3D
 var _crank: Node3D
 var _left_pedal: Node3D
@@ -58,8 +63,12 @@ var _arm_y := 0.0
 var _arm_z := 0.0
 var _arm_len := 0.0
 var _arm_alpha := 0.0
+var _arm_rest_t := Transform3D.IDENTITY   # SwingarmPivot's rest transform, in Player space
+var _rest_hub_p := Vector3.ZERO           # rear hub position in Player space at rest
+var _last_theta := 0.0                    # swingarm angle applied last frame (rad)
 
 var _front_c := 0.0
+var _rear_corr := 0.0       # contact correction currently applied to the rear wheel (m, + = lift)
 var _rear_c := 0.0
 var _front_angle := 0.0
 var _rear_angle := 0.0
@@ -83,26 +92,32 @@ func _ready() -> void:
 		set_physics_process(false)
 		return
 
-	_steering_pivot = find_child("SteeringPivot", true, false) as Node3D
-	_front_pivot = find_child("FrontWheelPivot", true, false) as Node3D
-	_front_wheel = find_child("FrontWheel", true, false) as Node3D
-	_swingarm_pivot = find_child("SwingarmPivot", true, false) as Node3D
-	_rear_wheel = find_child("RearWheel", true, false) as Node3D
-	_crank = find_child("CrankPivot", true, false) as Node3D
-	_left_pedal = find_child("LeftPedal", true, false) as Node3D
-	_right_pedal = find_child("RightPedal", true, false) as Node3D
-	_shock_body = find_child("ShockBody", true, false) as Node3D
-	_shock_pivot = find_child("ShockShaftPivot", true, false) as Node3D
+	_steering_pivot = _find_part("SteeringPivot")
+	_front_pivot = _find_part("FrontWheelPivot")
+	_front_wheel = _find_part("FrontWheel")
+	_swingarm_pivot = _find_part("SwingarmPivot")
+	_rear_wheel = _find_part("RearWheel")
+	_rear_pivot = _find_part("RearWheelPivot")
+	_crank = _find_part("CrankPivot")
+	_left_pedal = _find_part("LeftPedal")
+	_right_pedal = _find_part("RightPedal")
+	_shock_body = _find_part("ShockBody")
+	_shock_pivot = _find_part("ShockShaftPivot")
 
 	var parts := {
 		"SteeringPivot": _steering_pivot, "FrontWheelPivot": _front_pivot, "FrontWheel": _front_wheel,
-		"SwingarmPivot": _swingarm_pivot, "RearWheel": _rear_wheel, "CrankPivot": _crank,
+		"SwingarmPivot": _swingarm_pivot, "RearWheelPivot": _rear_pivot, "RearWheel": _rear_wheel, "CrankPivot": _crank,
 		"LeftPedal": _left_pedal, "RightPedal": _right_pedal,
 		"ShockBody": _shock_body, "ShockShaftPivot": _shock_pivot,
 	}
+	var missing := false
 	for part_name in parts:
 		if parts[part_name] == null:
+			missing = true
+			print("[BikeVisuals] PART NOT FOUND: %s (the script looks for a node with exactly this name)" % part_name)
 			push_warning("BikeVisuals: part not found in the model: " + part_name)
+	if missing:
+		print("[BikeVisuals] The names that really exist in the model: ", ", ".join(_node_names()))
 
 	# "to_local" converts world transforms into the Player's space (the model faces -Z in that space).
 	var to_local := player.global_transform.affine_inverse()
@@ -130,9 +145,11 @@ func _ready() -> void:
 		var arm_parent := _swingarm_pivot.get_parent() as Node3D
 		var basis_ap := (to_local * arm_parent.global_transform).basis.orthonormalized()
 		_rear_dir = basis_ap.inverse() * Vector3.UP
+		_arm_rest_t = to_local * _swingarm_pivot.global_transform
 		if _rear_wheel:
 			var pivot_pos := (to_local * _swingarm_pivot.global_transform).origin
 			var hub_pos := (to_local * _rear_wheel.global_transform).origin
+			_rest_hub_p = hub_pos
 			var r := hub_pos - pivot_pos
 			_arm_y = r.y
 			_arm_z = r.z
@@ -145,7 +162,14 @@ func _ready() -> void:
 		var body_in_parent := shock_parent.to_local(_shock_body.global_position)
 		_shock_dir = (body_in_parent - _shock_pivot.position).normalized()
 
+	if print_report and _swingarm_pivot and _rear_wheel:
+		var arm_mesh := find_child("SwingArm", true, false)
+		print("[BikeVisuals] HIERARCHY: RearWheel is at %s | is it below SwingarmPivot? %s | is the SwingArm mesh below SwingarmPivot? %s" % [
+			_rear_wheel.get_path(), _swingarm_pivot.is_ancestor_of(_rear_wheel),
+			arm_mesh != null and _swingarm_pivot.is_ancestor_of(arm_mesh)])
+
 	_calibrate(to_local)
+	_self_test_swingarm(to_local)
 
 
 func _physics_process(delta: float) -> void:
@@ -155,6 +179,8 @@ func _physics_process(delta: float) -> void:
 	var ke := 1.0 - exp(-extend_smoothing * delta)
 	var target_f := _target_compression(player.front, _front_a, _front_mesh_radius, player.front_compression, front_travel)
 	var target_r := _target_compression(player.rear, _rear_a, _rear_mesh_radius, player.rear_compression, rear_travel)
+	target_f = clampf(target_f - front_trim, 0.0, front_travel)
+	target_r = clampf(target_r - rear_trim, 0.0, rear_travel)
 	_front_c = _follow(_front_c, target_f, kc, ke)
 	_rear_c = _follow(_rear_c, target_r, kc, ke)
 
@@ -167,10 +193,28 @@ func _physics_process(delta: float) -> void:
 		if _arm_len > 0.15 and absf(_arm_z) > 0.02:
 			var c := clampf((_arm_y + _rear_c) / _arm_len, -1.0, 1.0)
 			var theta := (acos(c) - _arm_alpha) * signf(_arm_z)
-			_swingarm_pivot.basis = (_rest_basis[_swingarm_pivot] as Basis) * Basis(_right_axis[_swingarm_pivot] as Vector3, theta)
+			_last_theta = theta
+			# Rotate the rest pose around the bike's left-right axis (+X in Player space), keeping the pivot where it is.
+			var swung := Transform3D(Basis(Vector3.RIGHT, theta) * _arm_rest_t.basis, _arm_rest_t.origin)
+			_swingarm_pivot.global_transform = player.global_transform * swung
 		else:
 			# Pivot too close to the hub for a rotation: just lift the whole rear end.
 			_swingarm_pivot.position = (_rest_pos[_swingarm_pivot] as Vector3) + _rear_dir * _rear_c
+
+	# 3b. Rear contact correction. Whatever the swingarm maths gives, slowly slide the rear wheel along the
+	#     ground normal until the tire bottom really touches the hit point. It only removes a steady error
+	#     (the bounded lag of the smoothing averages out), so the suspension still looks smooth.
+	if _rear_pivot:
+		var rear_ray := player.rear
+		if rear_contact_correction and exact_contact and rear_ray.is_colliding() and _rear_mesh_radius > 0.0:
+			var down := (rear_ray.global_basis * rear_ray.target_position).normalized()
+			var rear_parent := _rear_pivot.get_parent() as Node3D
+			var local_up := rear_parent.global_basis.orthonormalized().inverse() * (-down)
+			_rear_pivot.position = (_rest_pos[_rear_pivot] as Vector3) + local_up * _rear_corr
+			var bottom := _rear_wheel.global_position + down * _rear_mesh_radius
+			var sunk := (bottom - rear_ray.get_collision_point()).dot(down)
+			_rear_corr = clampf(_rear_corr + sunk * (1.0 - exp(-6.0 * delta)), -0.1, 0.1)
+			_rear_pivot.position = (_rest_pos[_rear_pivot] as Vector3) + local_up * _rear_corr
 
 	# 4. Shock: the shaft slides into the body in proportion to the rear compression.
 	if _shock_pivot:
@@ -199,18 +243,47 @@ func _physics_process(delta: float) -> void:
 		_report_timer -= delta
 		if _report_timer <= 0.0:
 			_report_timer = 1.0
-			print("[BikeVisuals] wheel overlap with the ground (+ = sunk in, - = floating): front %s | rear %s | compression front %.1f cm, rear %.1f cm" % [
+			print("[BikeVisuals] wheel overlap with the ground (+ = sunk in, - = floating): front %s | rear %s | compression front %.1f cm, rear %.1f cm | rear contact correction %.1f mm" % [
 				_overlap(_front_wheel, player.front, _front_mesh_radius),
 				_overlap(_rear_wheel, player.rear, _rear_mesh_radius),
-				_front_c * 100.0, _rear_c * 100.0])
+				_front_c * 100.0, _rear_c * 100.0, _rear_corr * 1000.0])
+			if _swingarm_pivot and _rear_wheel:
+				var hub_now := player.global_transform.affine_inverse() * _rear_wheel.global_position
+				print("[BikeVisuals] REAR ARM: angle %.1f deg | hub rise caused by the rotation %.1f mm (wanted %.1f mm)" % [
+					rad_to_deg(_last_theta), (hub_now.y - _rest_hub_p.y - _rear_corr) * 1000.0, _rear_c * 1000.0])
+			if absf(_rear_corr) > 0.01:
+				print("[BikeVisuals] WARNING: the rear wheel needs %.0f mm of correction, so the swingarm rotation is not lifting the hub as it should." % (_rear_corr * 1000.0))
 
 
-## Moves `current` toward `target`: quickly when compressing (but never lagging more than max_sink),
-## slowly when extending.
+## Finds a part by name. Exact match first; then the same name ignoring capital letters and underscores
+## (so "SwingArmPivot" and "Swingarm_Pivot" also work).
+func _find_part(part_name: String) -> Node3D:
+	var exact := find_child(part_name, true, false) as Node3D
+	if exact:
+		return exact
+	var wanted := part_name.to_lower()
+	for n in find_children("*", "Node3D", true, false):
+		if str(n.name).to_lower().replace("_", "") == wanted:
+			print("[BikeVisuals] '%s' not found by exact name, using '%s' instead (different capital letters)" % [part_name, n.name])
+			return n as Node3D
+	return null
+
+
+## Names of all the Node3D nodes below this one (to compare with the names the script expects).
+func _node_names() -> PackedStringArray:
+	var names := PackedStringArray()
+	for n in find_children("*", "Node3D", true, false):
+		names.append(str(n.name))
+	return names
+
+
+## Moves `current` toward `target`. Smoothing hides small jitter, but the error is always bounded:
+## when compressing the wheel never lags more than max_sink (it would sink into the ground),
+## when extending it never hangs more than max_float above the ground.
 func _follow(current: float, target: float, k_compress: float, k_extend: float) -> float:
 	if target > current:
 		return maxf(lerpf(current, target, k_compress), target - max_sink)
-	return lerpf(current, target, k_extend)
+	return minf(lerpf(current, target, k_extend), target + max_float)
 
 
 ## How far the wheel must rise (along the ray) so that the TIRE BOTTOM touches the ground hit point.
@@ -223,6 +296,22 @@ func _target_compression(ray: RayCast3D, hub_a: float, radius: float, fallback: 
 		var distance := ray.global_position.distance_to(ray.get_collision_point())
 		return clampf(hub_a - (distance - radius), 0.0, travel)
 	return clampf(fallback, 0.0, travel)
+
+
+## Rotates SwingarmPivot by -10 degrees for an instant and reports how far the rear hub moved, then puts it back.
+## It proves (or disproves) that the wheel really hangs from the pivot and that the rotation axis is right.
+func _self_test_swingarm(to_local: Transform3D) -> void:
+	if _swingarm_pivot == null or _rear_wheel == null:
+		return
+	var test_theta := deg_to_rad(-10.0)
+	var expected_up := _arm_y * (cos(test_theta) - 1.0) - _arm_z * sin(test_theta)
+	var before := (to_local * _rear_wheel.global_transform).origin
+	_swingarm_pivot.global_transform = player.global_transform * Transform3D(Basis(Vector3.RIGHT, test_theta) * _arm_rest_t.basis, _arm_rest_t.origin)
+	var after := (to_local * _rear_wheel.global_transform).origin
+	_swingarm_pivot.global_transform = player.global_transform * _arm_rest_t
+	var moved := after - before
+	print("[BikeVisuals] SWINGARM TEST: rotating the arm by -10 degrees moved the rear hub %.1f mm up and %.1f mm sideways-forward/back (expected about %.1f mm up). If it moved 0, the wheel does not hang from SwingarmPivot or the pivot sits at the hub." % [
+		moved.y * 1000.0, moved.z * 1000.0, expected_up * 1000.0])
 
 
 ## Measures the model and tells you which wheel_radius and ray_to_hub match it.
@@ -240,6 +329,10 @@ func _calibrate(to_local: Transform3D) -> void:
 			_front_mesh_radius, player.front_wheel_radius, front_a, player.front_ray_to_hub])
 		print("[BikeVisuals] REAR  wheel: tire bottom is %.3f m below the wheel origin (Player.rear_wheel_radius = %.3f) | hub is %.3f m below the ray start (Player.rear_ray_to_hub = %.3f)" % [
 			_rear_mesh_radius, player.rear_wheel_radius, rear_a, player.rear_ray_to_hub])
+
+	if print_report:
+		print("[BikeVisuals] SWINGARM: the rear hub is %.3f m above and %.3f m behind SwingarmPivot (arm length %.3f m). If both are about 0, SwingarmPivot sits at the hub instead of the main pivot." % [
+			_arm_y, _arm_z, _arm_len])
 
 	if auto_calibrate:
 		if _front_mesh_radius > 0.0:

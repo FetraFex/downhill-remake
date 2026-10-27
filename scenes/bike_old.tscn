@@ -1,0 +1,9 @@
+[gd_scene format=3 uid="uid://bkura4l7lsltj"]
+
+[ext_resource type="Script" uid="uid://du30wp3e335q8" path="res://scripts/bike_visual.gd" id="1_ihi4v"]
+
+[node name="Bike" unique_id=245036662]
+script = ExtResource("1_ihi4v")
+
+[node name="BikeRoot" parent="." index="0" unique_id=312301600]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0, 0, 0)

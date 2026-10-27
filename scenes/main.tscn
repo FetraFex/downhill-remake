@@ -22,6 +22,13 @@ size = Vector3(100, 0.1, 100)
 [sub_resource type="BoxShape3D" id="BoxShape3D_ae08u"]
 size = Vector3(100, 0.1, 100)
 
+[sub_resource type="PrismMesh" id="PrismMesh_ae08u"]
+left_to_right = -2.0
+subdivide_width = 3
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_v03rh"]
+size = Vector3(0.9971924, 0.052734375, 2.8527832)
+
 [node name="World" type="Node3D" unique_id=54061640]
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=2020295237]
@@ -45,3 +52,14 @@ shape = SubResource("BoxShape3D_ae08u")
 [node name="Player" parent="." unique_id=2079259347 instance=ExtResource("2_0wfyh")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.14895546, 0)
 inertia = Vector3(45, 10, 22)
+
+[node name="StaticBody3D2" type="StaticBody3D" parent="." unique_id=519601254]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.4170985, -6.728763)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="StaticBody3D2" unique_id=582606421]
+transform = Transform3D(0, 0, -1.0000001, 0, 1, 0, 1.0000001, 0, 0, 0, -1, 0)
+mesh = SubResource("PrismMesh_ae08u")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="StaticBody3D2" unique_id=967807837]
+transform = Transform3D(1, 0, 0, 0, 0.9482409, -0.3175524, 0, 0.3175524, 0.9482409, -0.0014038086, -0.9875773, -1.098917)
+shape = SubResource("BoxShape3D_v03rh")

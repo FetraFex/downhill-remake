@@ -1,10 +1,10 @@
-[gd_scene format=3 uid="uid://bkura4l7lsltj"]
+[gd_scene format=3 uid="uid://4m1gv4wrjq0h"]
 
-[ext_resource type="PackedScene" uid="uid://ctnp11lm3sjh4" path="res://assets/models/bikes/Bike.glb" id="1_oy3wg"]
+[ext_resource type="PackedScene" uid="uid://d1bxb3ijsohv5" path="res://assets/models/bikes/Bike.glb" id="1_oy3wg"]
 [ext_resource type="Script" uid="uid://du30wp3e335q8" path="res://scripts/bike_visual.gd" id="2_77r6i"]
 
-[node name="Bike" unique_id=245036662 instance=ExtResource("1_oy3wg")]
+[node name="Bike" unique_id=743014416 instance=ExtResource("1_oy3wg")]
 script = ExtResource("2_77r6i")
 
-[node name="BikeRoot" parent="." index="0" unique_id=312301600]
+[node name="BikeRoot" parent="." index="0" unique_id=1259186778]
 transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0, 0, 0)
