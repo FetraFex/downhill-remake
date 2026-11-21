@@ -1,0 +1,8 @@
+[gd_scene format=3 uid="uid://b327vrn0uco2r"]
+
+[ext_resource type="PackedScene" uid="uid://h8xv0vgqs8dc" path="res://assets/characters/character_1.glb" id="1_bq1av"]
+[ext_resource type="Script" uid="uid://c7ljk4n8h11jr" path="res://scripts/rider_rig.gd" id="2_a8d8s"]
+
+[node name="Rider" unique_id=1379104264 node_paths=PackedStringArray("skeleton") instance=ExtResource("1_bq1av")]
+script = ExtResource("2_a8d8s")
+skeleton = NodePath("root/GeneralSkeleton")

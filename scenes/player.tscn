@@ -6,6 +6,7 @@
 [ext_resource type="PackedScene" uid="uid://4m1gv4wrjq0h" path="res://scenes/bike.tscn" id="2_qlg0r"]
 [ext_resource type="Script" uid="uid://bvuon3jwv63t0" path="res://scripts/bike_debug.gd" id="2_tuyoq"]
 [ext_resource type="Script" uid="uid://bd046eokvcnu2" path="res://addons/phantom_camera/scripts/phantom_camera_host/phantom_camera_host.gd" id="3_qlg0r"]
+[ext_resource type="PackedScene" uid="uid://b327vrn0uco2r" path="res://scenes/rider.tscn" id="7_fjrip"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_ae08u"]
 radius = 0.15
@@ -71,3 +72,23 @@ metadata/_custom_type_script = "uid://csjccrhj5wnx7"
 
 [node name="FollowCamera" type="Node3D" parent="." unique_id=413628509]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0835514, 0.14700317)
+
+[node name="Rider" parent="." unique_id=1379104264 node_paths=PackedStringArray("player") instance=ExtResource("7_fjrip")]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0, 0, 0)
+player = NodePath("..")
+grip_l_name = "HandGrip_R"
+grip_r_name = "HandGrip_L"
+hips_bone = "Hips"
+spine_bones = ["Spine", "Chest", "UpperChest"]
+upper_arm_l = "LeftUpperArm"
+lower_arm_l = "LeftLowerArm"
+hand_l = "LeftHand"
+upper_arm_r = "RightUpperArm"
+lower_arm_r = "RightLowerArm"
+hand_r = "RightHand"
+upper_leg_l = "LeftUpperLeg"
+lower_leg_l = "LeftLowerLeg"
+foot_l = "LeftFoot"
+upper_leg_r = "RightUpperLeg"
+lower_leg_r = "RightLowerLeg"
+foot_r = "RightFoot"

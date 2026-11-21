@@ -8,3 +8,6 @@ script = ExtResource("2_77r6i")
 
 [node name="BikeRoot" parent="." index="0" unique_id=1259186778]
 transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, 0, 0, 0)
+
+[node name="Pedal_R" parent="BikeRoot/CrankPivot/RightPedal" parent_id_path=PackedInt32Array(1121909241) index="0" unique_id=128242140]
+transform = Transform3D(0.999969, 0.007874339, -7.683411e-08, -7.543715e-08, -2.384186e-07, -1.0000001, -0.007874338, 0.9999691, -2.3841858e-07, 0.00010994077, 0.05466745, 0.015762538)
