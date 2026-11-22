@@ -40,16 +40,32 @@ extends Node3D
 @export var torso_lean_deg := 35.0                   # how far the torso leans forward
 @export var hand_offset := Vector3.ZERO              # from the grip marker to the wrist, in the MARKER's own axes (it turns with the bars)
 @export var foot_offset := Vector3(0.0, 0.10, 0.0)   # from the pedal marker to the ankle, in the MARKER's own axes
-@export var knee_pole_forward := 0.4                 # knees point this far forward
-@export var elbow_pole_back := 0.3                   # elbows point back and outward
-@export var elbow_pole_out := 0.2
+@export var grip_hand_factor := 0.7                  # how far along wrist -> knuckles the bar sits in the hand (0 = wrist, 1 = knuckles)
 
-@export_group("Orientation of hands and feet (degrees, relative to the grip / pedal marker)")
+@export_group("Pole targets (decide which way knees and elbows point)")
+## Poles are placed from the HIP / SHOULDER joint, in bike space, and stay fixed to the bike.
+## To place them by hand instead, add Marker3D nodes with the names below anywhere under the Player and
+## move them in the editor: the script then uses them automatically.
+@export var knee_pole_forward := 0.6                 # in front of the hip
+@export var knee_pole_out := 0.12                    # outward (knees slightly out)
+@export var elbow_pole_back := 0.5                   # behind the shoulder
+@export var elbow_pole_out := 0.3                    # outward
+@export var elbow_pole_down := 0.1
+@export var pole_names := PackedStringArray(["ElbowPole_L", "ElbowPole_R", "KneePole_L", "KneePole_R"])
+@export var show_markers := true                     # small spheres: red = IK targets, blue = poles, green = grip / pedal markers
+
+@export_group("Orientation of hands and feet (degrees, in BIKE terms, starting from the rider's rest pose)")
 @export var copy_orientation := true      # hands wrap the grips, feet lie flat on the pedals
-@export var hand_l_rotation_deg := Vector3.ZERO
-@export var hand_r_rotation_deg := Vector3.ZERO
-@export var foot_l_rotation_deg := Vector3.ZERO
-@export var foot_r_rotation_deg := Vector3.ZERO
+## x = pitch: swings the fingers forward (+) or back (-) around the bike's left-right axis
+## y = yaw:   turns the fingers inward / outward around the vertical axis
+## z = roll:  turns the palm around the fore-aft axis
+## Start values assume the rest pose has the fingers pointing DOWN and the palms facing the thighs.
+@export var hand_l_pose_deg := Vector3(90.0, 0.0, -90.0)
+@export var hand_r_pose_deg := Vector3(90.0, 0.0, 90.0)
+## Feet need no tuning: they keep their standing orientation relative to the pedal (flat, pointing forward).
+## Use x only to tilt the ankle a little (for example heel down).
+@export var foot_l_pose_deg := Vector3.ZERO
+@export var foot_r_pose_deg := Vector3.ZERO
 @export var print_report := true
 
 var _chains: Array = []                  # [upper, middle, end] bone names for: arm L, arm R, leg L, leg R
@@ -58,6 +74,10 @@ var _targets: Array[Marker3D] = []
 var _poles: Array[Marker3D] = []
 var _pole_local: Array[Vector3] = []     # pole positions in the Player's space
 var _end_bone: Array[int] = []
+var _palm_local: Array[Vector3] = []     # wrist -> palm vector in the hand bone's own rest axes (hands only)
+var _user_poles: Array[Node3D] = []      # poles placed by hand (or null)
+var _rest_end_basis: Array[Basis] = []   # hand / foot bone orientation at rest, in the Player's space
+var _anchor_rest: Array[Basis] = []      # grip / pedal marker orientation at rest, in the Player's space
 var _report_timer := 1.0
 
 
@@ -119,11 +139,45 @@ func _ready() -> void:
 			set_physics_process(false)
 			return
 		_anchors.append(anchor)
+		if show_markers:
+			_add_marker_visual(anchor, Color(0.2, 1.0, 0.3))   # green: the marker itself, the bar / pedal
+
+	# 2b. Palm vector of each hand: from the wrist to the middle of its child bones (the knuckles), in the hand
+	#     bone's own rest axes. It is used to put the PALM, not the wrist, on the grip.
+	for i in 2:
+		var hand_idx := skeleton.find_bone(_chains[i][2])
+		var kids := skeleton.get_bone_children(hand_idx)
+		if kids.is_empty():
+			_palm_local.append(Vector3.ZERO)
+			push_warning("RiderRig: the hand bone has no child (finger) bones, the wrist will be put on the grip.")
+		else:
+			var rest_hand := skeleton.get_bone_global_rest(hand_idx)
+			var sum := Vector3.ZERO
+			for k in kids:
+				sum += skeleton.get_bone_global_rest(k).origin
+			var knuckles := sum / kids.size()
+			_palm_local.append(rest_hand.basis.orthonormalized().inverse() * (knuckles - rest_hand.origin))
+
+	# 2c. Poles you placed yourself (Marker3D with the names in pole_names), if any.
+	for i in 4:
+		var user_pole: Node3D = null
+		if i < pole_names.size():
+			user_pole = player.find_child(pole_names[i], true, false) as Node3D
+		_user_poles.append(user_pole)
 
 	# 3. Put the hips on the seat (move the whole rider).
 	var hips_idx := skeleton.find_bone(hips_bone)
 	var hips_world := skeleton.global_transform * skeleton.get_bone_global_pose(hips_idx).origin
 	global_position += (seat.global_position + player.global_basis * hips_offset) - hips_world
+
+	# 3b. Remember the REST orientation of each hand and foot (and of its anchor) in the Player's space,
+	#     before the torso leans. Orientation targets are built from these, so the bone's own axis
+	#     convention does not matter.
+	var skel_to_player := player.global_basis.orthonormalized().inverse() * skeleton.global_basis.orthonormalized()
+	for i in 4:
+		var end_idx := skeleton.find_bone(_chains[i][2])
+		_rest_end_basis.append((skel_to_player * skeleton.get_bone_global_pose(end_idx).basis).orthonormalized())
+		_anchor_rest.append((player.global_basis.orthonormalized().inverse() * _anchors[i].global_basis).orthonormalized())
 
 	# 4. Lean the torso forward: rotate the spine bones around the bike's left-right axis.
 	if not spine_bones.is_empty():
@@ -138,17 +192,17 @@ func _ready() -> void:
 	# 5. Pole targets: they decide which way the knees and elbows point. Each starts at the joint's
 	#    current position and is moved forward (knees) or back and outward (elbows), fixed to the bike.
 	for i in 4:
-		var mid_idx := skeleton.find_bone(_chains[i][1])
-		var mid_local := player.to_local(skeleton.global_transform * skeleton.get_bone_global_pose(mid_idx).origin)
+		var root_idx := skeleton.find_bone(_chains[i][0])   # hip or shoulder joint
+		var mid_local := player.to_local(skeleton.global_transform * skeleton.get_bone_global_pose(root_idx).origin)
 		var side := signf(mid_local.x) if absf(mid_local.x) > 0.001 else 1.0
 		var anchor_side := signf(player.to_local(_anchors[i].global_position).x)
 		if anchor_side != 0.0 and anchor_side != side:
 			push_warning("RiderRig: limb %d is on the opposite side of its anchor. Check the left/right bone names, and that the rider faces -Z." % i)
 		var pole_local := mid_local
 		if i < 2:
-			pole_local += Vector3(side * elbow_pole_out, 0.0, elbow_pole_back)
+			pole_local += Vector3(side * elbow_pole_out, -elbow_pole_down, elbow_pole_back)
 		else:
-			pole_local += Vector3(side * 0.05, 0.0, -knee_pole_forward)
+			pole_local += Vector3(side * knee_pole_out, 0.0, -knee_pole_forward)
 		_pole_local.append(pole_local)
 
 		var target := Marker3D.new()
@@ -159,6 +213,9 @@ func _ready() -> void:
 		pole.name = "IKPole%d" % i
 		add_child(pole)
 		_poles.append(pole)
+		if show_markers:
+			_add_marker_visual(target, Color(1.0, 0.2, 0.2))
+			_add_marker_visual(pole, Color(0.3, 0.5, 1.0))
 		_end_bone.append(skeleton.find_bone(_chains[i][2]))
 	_update_targets()
 
@@ -194,16 +251,45 @@ func _physics_process(delta: float) -> void:
 
 
 ## Targets follow the grips and pedals (they move with the steering and the cranks); poles stay fixed to the bike.
-## The offset and the rotation are expressed in the anchor's OWN axes, so when the bars turn, the hand turns with them.
+## ORIENTATION = (how much the anchor has turned since rest) * (your pitch/yaw/roll in bike terms) * (the bone's rest orientation).
+## POSITION (hands) = grip - (wrist -> palm vector, turned by the hand's orientation) * grip_hand_factor, so the PALM sits on the grip.
 func _update_targets() -> void:
-	var rotations: Array[Vector3] = [hand_l_rotation_deg, hand_r_rotation_deg, foot_l_rotation_deg, foot_r_rotation_deg]
+	var pb := player.global_basis.orthonormalized()
+	var poses: Array[Vector3] = [hand_l_pose_deg, hand_r_pose_deg, foot_l_pose_deg, foot_r_pose_deg]
 	for i in 4:
 		var anchor_basis := _anchors[i].global_basis
+		var turned := (pb.inverse() * anchor_basis).orthonormalized() * _anchor_rest[i].inverse()
+		var p := poses[i]
+		# pitch first (swing the fingers), then roll (turn the palm), then yaw (turn inward / outward)
+		var user := Basis(Vector3.UP, deg_to_rad(p.y)) * Basis(Vector3(0.0, 0.0, 1.0), deg_to_rad(p.z)) * Basis(Vector3.RIGHT, deg_to_rad(p.x))
+		_targets[i].global_basis = pb * turned * user * _rest_end_basis[i]
+
 		var offset := hand_offset if i < 2 else foot_offset
-		var rot := rotations[i]
-		_targets[i].global_position = _anchors[i].global_position + anchor_basis * offset
-		_targets[i].global_basis = anchor_basis * Basis.from_euler(Vector3(deg_to_rad(rot.x), deg_to_rad(rot.y), deg_to_rad(rot.z)))
-		_poles[i].global_position = player.global_transform * _pole_local[i]
+		var wanted := _anchors[i].global_position + anchor_basis * offset
+		if i < 2:
+			wanted -= _targets[i].global_basis * _palm_local[i] * grip_hand_factor
+		_targets[i].global_position = wanted
+
+		if _user_poles[i] != null:
+			_poles[i].global_position = _user_poles[i].global_position
+		else:
+			_poles[i].global_position = player.global_transform * _pole_local[i]
+
+
+## A small unshaded sphere that is always visible, to see targets and poles while the game runs.
+func _add_marker_visual(marker: Node3D, color: Color) -> void:
+	var mesh_instance := MeshInstance3D.new()
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.02
+	sphere.height = 0.04
+	mesh_instance.mesh = sphere
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.albedo_color = color
+	mat.no_depth_test = true
+	mesh_instance.material_override = mat
+	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	marker.add_child(mesh_instance)
 
 
 ## Adds a CopyTransformModifier3D that copies the ROTATION of each target onto its hand or foot bone.
